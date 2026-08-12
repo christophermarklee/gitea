@@ -92,7 +92,19 @@ jobs:
            (github.event_name == 'push' && github.ref == 'refs/heads/main'))
           && steps.plan.outputs.exitcode == '0'
         working-directory: ${{ inputs.working_dir || 'terragrunt/runner' }}
-        run: terragrunt apply tfplan
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          # When applying the runner module, a fresh registration token is required at apply-time.
+          if [ "${{ inputs.working_dir || 'terragrunt/runner' }}" = "terragrunt/runner" ]; then
+            TOKEN=$(gh api --method POST -H "Accept: application/vnd.github+json" \
+              /repos/${{ github.repository }}/actions/runners/registration-token \
+              --jq .token)
+            echo "::add-mask::$TOKEN"
+            export RUNNER_REGISTRATION_TOKEN="$TOKEN"
+          fi
+
+          terragrunt apply tfplan
 
       - name: Terragrunt Destroy
         if: inputs.action == 'destroy'
