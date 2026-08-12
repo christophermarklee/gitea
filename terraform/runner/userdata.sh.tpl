@@ -29,6 +29,8 @@ curl -fsSLo runner.tar.gz \
 tar xzf runner.tar.gz
 rm runner.tar.gz
 
+./bin/installdependencies.sh
+
 chown -R ubuntu:ubuntu "$RUNNER_DIR"
 
 sudo -u ubuntu ./config.sh \
