@@ -95,6 +95,22 @@ resource "aws_security_group" "runner" {
   description = "GitHub self-hosted runner"
   vpc_id      = aws_vpc.runner.id
 
+  ingress {
+    description = "Gitea HTTP"
+    from_port   = 3000
+    to_port     = 3000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Gitea SSH"
+    from_port   = 2222
+    to_port     = 2222
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
   egress {
     description = "Allow all outbound"
     from_port   = 0
