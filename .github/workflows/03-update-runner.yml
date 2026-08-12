@@ -55,11 +55,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region:     ${{ vars.AWS_REGION || 'us-east-1' }}
+      # NOTE: AWS credentials configuration removed because this job does not call AWS APIs.
 
       - name: Trigger runner auto-update via GitHub API
         env:
