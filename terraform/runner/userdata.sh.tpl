@@ -14,6 +14,7 @@ apt-get install -y \
   awscli
 
 systemctl enable --now docker
+usermod -aG docker ubuntu
 
 ### GitHub Actions runner ###
 RUNNER_VERSION=$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest \
