@@ -1,5 +1,5 @@
 locals {
-  aws_region   = "us-east-1"
+  aws_region   = get_env("AWS_REGION", "us-east-1")
   github_owner = get_env("GITHUB_REPOSITORY_OWNER", "")
   github_repo  = get_env("GITHUB_REPO_NAME", "gitea")
   runner_name  = "gitea-runner"
