@@ -1,0 +1,89 @@
+name: "01 – Create AWS Self-Hosted Runner"
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_type:
+        description: "EC2 instance type"
+        required: false
+        default: "t3.medium"
+
+permissions:
+  contents: read
+  id-token: write   # OIDC federation with AWS
+
+jobs:
+  provision-runner:
+    name: Provision EC2 Runner
+    runs-on: ubuntu-latest
+
+    env:
+      TF_STATE_BUCKET:  ${{ vars.TF_STATE_BUCKET }}
+      TF_LOCK_TABLE:    ${{ vars.TF_LOCK_TABLE }}
+      GITHUB_REPO_NAME: ${{ github.event.repository.name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume:    ${{ secrets.AWS_ROLE_ARN }}
+          aws-region:        ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Get runner registration token
+        id: reg-token
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          TOKEN=$(gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            /repos/${{ github.repository }}/actions/runners/registration-token \
+            --jq .token)
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.5"
+
+      - name: Install Terragrunt
+        run: |
+          VERSION=$(curl -fsSL https://api.github.com/repos/gruntwork-io/terragrunt/releases/latest \
+            | jq -r '.tag_name')
+          curl -fsSLo /usr/local/bin/terragrunt \
+            "https://github.com/gruntwork-io/terragrunt/releases/download/${VERSION}/terragrunt_linux_amd64"
+          chmod +x /usr/local/bin/terragrunt
+
+      - name: Terragrunt Init
+        working-directory: terragrunt/runner
+        env:
+          RUNNER_REGISTRATION_TOKEN: ${{ steps.reg-token.outputs.token }}
+          TF_VAR_instance_type:      ${{ inputs.instance_type }}
+        run: terragrunt init -upgrade
+
+      - name: Terragrunt Plan
+        working-directory: terragrunt/runner
+        env:
+          RUNNER_REGISTRATION_TOKEN: ${{ steps.reg-token.outputs.token }}
+          TF_VAR_instance_type:      ${{ inputs.instance_type }}
+        run: terragrunt plan -out=tfplan
+
+      - name: Terragrunt Apply
+        working-directory: terragrunt/runner
+        env:
+          RUNNER_REGISTRATION_TOKEN: ${{ steps.reg-token.outputs.token }}
+          TF_VAR_instance_type:      ${{ inputs.instance_type }}
+        run: terragrunt apply tfplan
+
+      - name: Output instance information
+        working-directory: terragrunt/runner
+        env:
+          RUNNER_REGISTRATION_TOKEN: ${{ steps.reg-token.outputs.token }}
+        run: |
+          INSTANCE_ID=$(terragrunt output -raw instance_id)
+          echo "Runner instance ID: $INSTANCE_ID"
+          echo "RUNNER_INSTANCE_ID=$INSTANCE_ID" >> "$GITHUB_STEP_SUMMARY"

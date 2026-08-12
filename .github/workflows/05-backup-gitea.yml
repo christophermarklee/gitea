@@ -1,0 +1,97 @@
+name: "05 – Backup Gitea to S3 Glacier"
+
+on:
+  schedule:
+    # Run daily at 02:00 UTC
+    - cron: "0 2 * * *"
+
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: "Number of days before transitioning to Glacier (0 = immediate)"
+        required: false
+        default: "0"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  backup:
+    name: Backup Gitea data to S3 Glacier
+    runs-on: [self-hosted, linux, x64, aws]
+
+    env:
+      DATA_DIR:        /opt/gitea/data
+      BACKUP_BUCKET:   ${{ vars.BACKUP_BUCKET }}
+      BACKUP_PREFIX:   gitea-backups
+      RETENTION_DAYS:  ${{ inputs.retention_days || '0' }}
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region:     ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Verify data directory exists
+        run: |
+          if [ ! -d "$DATA_DIR" ]; then
+            echo "ERROR: Gitea data directory '$DATA_DIR' not found." >&2
+            exit 1
+          fi
+
+      - name: Create backup archive
+        id: create-archive
+        run: |
+          TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
+          ARCHIVE_NAME="gitea-backup-${TIMESTAMP}.tar.gz"
+          ARCHIVE_PATH="/tmp/${ARCHIVE_NAME}"
+
+          echo "Creating backup archive: $ARCHIVE_PATH"
+          sudo tar -czf "$ARCHIVE_PATH" -C "$(dirname "$DATA_DIR")" "$(basename "$DATA_DIR")"
+
+          ARCHIVE_SIZE=$(du -sh "$ARCHIVE_PATH" | cut -f1)
+          echo "Archive size: $ARCHIVE_SIZE"
+
+          echo "archive_path=$ARCHIVE_PATH"   >> "$GITHUB_OUTPUT"
+          echo "archive_name=$ARCHIVE_NAME"   >> "$GITHUB_OUTPUT"
+          echo "archive_size=$ARCHIVE_SIZE"   >> "$GITHUB_OUTPUT"
+          echo "timestamp=$TIMESTAMP"         >> "$GITHUB_OUTPUT"
+
+      - name: Upload archive to S3 with Glacier transition
+        run: |
+          ARCHIVE_PATH="${{ steps.create-archive.outputs.archive_path }}"
+          ARCHIVE_NAME="${{ steps.create-archive.outputs.archive_name }}"
+          S3_KEY="${BACKUP_PREFIX}/${ARCHIVE_NAME}"
+
+          if [ "$RETENTION_DAYS" = "0" ]; then
+            # Upload directly to Glacier Instant Retrieval
+            aws s3 cp "$ARCHIVE_PATH" "s3://${BACKUP_BUCKET}/${S3_KEY}" \
+              --storage-class GLACIER_IR \
+              --sse AES256
+          else
+            # Upload to STANDARD and let a lifecycle rule transition to Glacier
+            aws s3 cp "$ARCHIVE_PATH" "s3://${BACKUP_BUCKET}/${S3_KEY}" \
+              --storage-class STANDARD \
+              --sse AES256
+          fi
+
+          echo "Uploaded to s3://${BACKUP_BUCKET}/${S3_KEY}"
+
+      - name: Remove local archive
+        if: always()
+        run: rm -f "${{ steps.create-archive.outputs.archive_path }}"
+
+      - name: Post backup info to summary
+        run: |
+          {
+            echo "## Gitea Backup"
+            echo "| Key | Value |"
+            echo "|-----|-------|"
+            echo "| Archive | ${{ steps.create-archive.outputs.archive_name }} |"
+            echo "| Size | ${{ steps.create-archive.outputs.archive_size }} |"
+            echo "| Timestamp | ${{ steps.create-archive.outputs.timestamp }} |"
+            echo "| S3 Bucket | $BACKUP_BUCKET |"
+            echo "| Storage class | $( [ \"$RETENTION_DAYS\" = \"0\" ] && echo 'GLACIER_IR' || echo 'STANDARD → Glacier' ) |"
+          } >> "$GITHUB_STEP_SUMMARY"
