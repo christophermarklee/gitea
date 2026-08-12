@@ -28,8 +28,8 @@ permissions:
 jobs:
   deploy-gitea:
     name: Deploy Gitea on self-hosted runner
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: [self-hosted, linux, x64, aws]
-
     env:
       GITEA_VERSION: ${{ inputs.gitea_version || 'latest' }}
       HTTP_PORT:     ${{ inputs.http_port || '3000' }}
