@@ -1,0 +1,112 @@
+name: "02 – Terragrunt Init / Plan / Apply"
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terragrunt action to run"
+        required: true
+        default: "plan"
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+      working_dir:
+        description: "Path to the Terragrunt module (relative to repo root)"
+        required: false
+        default: "terragrunt/runner"
+
+  push:
+    branches:
+      - main
+    paths:
+      - "terraform/**"
+      - "terragrunt/**"
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write   # for plan comments on PRs
+
+jobs:
+  terragrunt:
+    name: Terragrunt ${{ inputs.action || 'plan' }}
+    runs-on: ubuntu-latest
+
+    env:
+      TF_STATE_BUCKET:  ${{ vars.TF_STATE_BUCKET }}
+      TF_LOCK_TABLE:    ${{ vars.TF_LOCK_TABLE }}
+      GITHUB_REPO_NAME: ${{ github.event.repository.name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region:     ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.5"
+
+      - name: Install Terragrunt
+        run: |
+          VERSION=$(curl -fsSL https://api.github.com/repos/gruntwork-io/terragrunt/releases/latest \
+            | jq -r '.tag_name')
+          curl -fsSLo /usr/local/bin/terragrunt \
+            "https://github.com/gruntwork-io/terragrunt/releases/download/${VERSION}/terragrunt_linux_amd64"
+          chmod +x /usr/local/bin/terragrunt
+
+      - name: Terragrunt Init -upgrade
+        working-directory: ${{ inputs.working_dir || 'terragrunt/runner' }}
+        run: terragrunt init -upgrade
+
+      - name: Terragrunt Validate
+        working-directory: ${{ inputs.working_dir || 'terragrunt/runner' }}
+        run: terragrunt validate
+
+      - name: Terragrunt Plan
+        id: plan
+        working-directory: ${{ inputs.working_dir || 'terragrunt/runner' }}
+        run: |
+          terragrunt plan -out=tfplan 2>&1 | tee plan.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Post plan to step summary
+        run: |
+          {
+            echo '## Terragrunt Plan Output'
+            echo '```'
+            cat ${{ inputs.working_dir || 'terragrunt/runner' }}/plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Terragrunt Apply
+        if: >
+          (inputs.action == 'apply' ||
+           (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+          && steps.plan.outputs.exitcode == '0'
+        working-directory: ${{ inputs.working_dir || 'terragrunt/runner' }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          # When applying the runner module, a fresh registration token is required at apply-time.
+          if [ "${{ inputs.working_dir || 'terragrunt/runner' }}" = "terragrunt/runner" ]; then
+            TOKEN=$(gh api --method POST -H "Accept: application/vnd.github+json" \
+              /repos/${{ github.repository }}/actions/runners/registration-token \
+              --jq .token)
+            echo "::add-mask::$TOKEN"
+            export RUNNER_REGISTRATION_TOKEN="$TOKEN"
+          fi
+
+          terragrunt apply tfplan
+
+      - name: Terragrunt Destroy
+        if: inputs.action == 'destroy'
+        working-directory: ${{ inputs.working_dir || 'terragrunt/runner' }}
+        run: terragrunt destroy -auto-approve

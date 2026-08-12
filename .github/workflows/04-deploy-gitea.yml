@@ -1,0 +1,93 @@
+name: "04 – Deploy Gitea Docker"
+
+on:
+  workflow_dispatch:
+    inputs:
+      gitea_version:
+        description: "Gitea image tag (e.g. 1.21, latest)"
+        required: false
+        default: "latest"
+      http_port:
+        description: "Host HTTP port for Gitea"
+        required: false
+        default: "3000"
+      ssh_port:
+        description: "Host SSH port for Gitea"
+        required: false
+        default: "2222"
+
+  # Automatically deploy once the runner comes online
+  workflow_run:
+    workflows: ["03 – Update Self-Hosted Runner"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-gitea:
+    name: Deploy Gitea on self-hosted runner
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: [self-hosted, linux, x64, aws]
+    env:
+      GITEA_VERSION: ${{ inputs.gitea_version || 'latest' }}
+      HTTP_PORT:     ${{ inputs.http_port || '3000' }}
+      SSH_PORT:      ${{ inputs.ssh_port || '2222' }}
+      DATA_DIR:      /opt/gitea/data
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create Gitea data directory
+        run: sudo mkdir -p "$DATA_DIR" && sudo chown -R ubuntu:ubuntu "$DATA_DIR"
+
+      - name: Pull Gitea Docker image
+        run: docker pull "gitea/gitea:$GITEA_VERSION"
+
+      - name: Stop existing Gitea container (if any)
+        run: docker rm -f gitea 2>/dev/null || true
+
+      - name: Start Gitea container
+        run: |
+          docker run -d \
+            --name gitea \
+            --restart unless-stopped \
+            -p "$HTTP_PORT:3000" \
+            -p "$SSH_PORT:22" \
+            -v "$DATA_DIR":/data \
+            -e USER_UID=1000 \
+            -e USER_GID=1000 \
+            "gitea/gitea:$GITEA_VERSION"
+
+      - name: Wait for Gitea to become healthy
+        run: |
+          echo "Waiting for Gitea to respond on port $HTTP_PORT…"
+          for i in $(seq 1 30); do
+            if curl -sf "http://localhost:$HTTP_PORT/-/health" > /dev/null 2>&1; then
+              echo "Gitea is healthy."
+              exit 0
+            fi
+            echo "  attempt $i/30 – not ready, sleeping 10 s…"
+            sleep 10
+          done
+          echo "ERROR: Gitea did not become healthy within 5 minutes" >&2
+          docker logs gitea
+          exit 1
+
+      - name: Print Gitea version
+        run: docker exec gitea gitea --version
+
+      - name: Post deployment info to summary
+        run: |
+          PUBLIC_IP=$(curl -sf http://checkip.amazonaws.com || echo "unknown")
+          {
+            echo "## Gitea Deployment"
+            echo "| Key | Value |"
+            echo "|-----|-------|"
+            echo "| Image | gitea/gitea:$GITEA_VERSION |"
+            echo "| Web UI | http://$PUBLIC_IP:$HTTP_PORT |"
+            echo "| SSH | $PUBLIC_IP:$SSH_PORT |"
+            echo "| Data directory | $DATA_DIR |"
+          } >> "$GITHUB_STEP_SUMMARY"

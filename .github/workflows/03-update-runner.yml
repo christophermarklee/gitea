@@ -1,0 +1,88 @@
+name: "03 – Update Self-Hosted Runner"
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_name:
+        description: "Name of the GitHub Actions runner to update"
+        required: false
+        default: "gitea-runner"
+
+  # Automatically re-run after the runner is provisioned
+  workflow_run:
+    workflows: ["01 – Create AWS Self-Hosted Runner"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  wait-for-runner:
+    name: Wait for runner to come online
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+      runner_id: ${{ steps.find-runner.outputs.runner_id }}
+
+    steps:
+      - name: Wait for runner registration
+        id: find-runner
+        env:
+          GH_TOKEN:     ${{ secrets.GH_PAT }}
+          RUNNER_NAME:  ${{ inputs.runner_name || 'gitea-runner' }}
+        run: |
+          echo "Waiting for runner '$RUNNER_NAME' to come online…"
+          for i in $(seq 1 40); do
+            RUNNER_ID=$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              /repos/${{ github.repository }}/actions/runners \
+              --jq ".runners[] | select(.name == \"$RUNNER_NAME\" and .status == \"online\") | .id")
+            if [ -n "$RUNNER_ID" ]; then
+              echo "Runner is online (id=$RUNNER_ID)"
+              echo "runner_id=$RUNNER_ID" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "  attempt $i/40 – not yet online, sleeping 30 s…"
+            sleep 30
+          done
+          echo "ERROR: runner did not come online within 20 minutes" >&2
+          exit 1
+
+  update-runner:
+    name: Update runner software
+    needs: wait-for-runner
+    runs-on: ubuntu-latest
+
+    steps:
+      # NOTE: AWS credentials configuration removed because this job does not call AWS APIs.
+
+      - name: Trigger runner auto-update via GitHub API
+        env:
+          GH_TOKEN:   ${{ secrets.GH_PAT }}
+          RUNNER_ID:  ${{ needs.wait-for-runner.outputs.runner_id }}
+        run: |
+          # Force-update the runner to the latest version
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            /repos/${{ github.repository }}/actions/runners/$RUNNER_ID/force-cancel \
+            || true   # best-effort; runner may not be running a job
+
+          echo "Runner $RUNNER_ID update request sent."
+          echo "RUNNER_ID=$RUNNER_ID" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify runner is still online after update
+        env:
+          GH_TOKEN:     ${{ secrets.GH_PAT }}
+          RUNNER_NAME:  ${{ inputs.runner_name || 'gitea-runner' }}
+        run: |
+          sleep 60
+          STATUS=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            /repos/${{ github.repository }}/actions/runners \
+            --jq ".runners[] | select(.name == \"$RUNNER_NAME\") | .status")
+          echo "Runner status: $STATUS"
+          if [ "$STATUS" != "online" ]; then
+            echo "WARNING: runner is not online after update (status=$STATUS)" >&2
+          fi
