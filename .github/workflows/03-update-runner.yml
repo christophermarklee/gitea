@@ -21,8 +21,8 @@ permissions:
 jobs:
   wait-for-runner:
     name: Wait for runner to come online
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-    outputs:
       runner_id: ${{ steps.find-runner.outputs.runner_id }}
 
     steps:
